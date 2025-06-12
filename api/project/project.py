@@ -1,6 +1,7 @@
 import time
 import traceback
 import asyncio
+from typing import List
 from bson import ObjectId
 from fastapi import APIRouter, Depends, BackgroundTasks, File, UploadFile, Form
 
@@ -332,48 +333,95 @@ async def update_project_data(request_data: dict, db=Depends(get_mongo_db), _: d
 
 
 @router.post("/upload")
-async def upload_and_parse_file(
-    file: UploadFile = File(...), 
+async def upload_and_parse_files(
+    files: List[UploadFile] = File(...), 
     id: str = Form(...),
     db=Depends(get_mongo_db), 
     _: dict = Depends(verify_token), 
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    """上传并解析扫描结果文件（支持.json, .dat格式）"""
+    """批量上传并解析扫描结果文件（支持.json, .dat格式）"""
     try:
         # 验证项目是否存在
         project = await db.project.find_one({"_id": ObjectId(id)})
         if not project:
             return {"code": 404, "message": "项目不存在"}
         
-        # 读取并解析文件
-        content = await file.read()
-        parsed_results = await parse_uploaded_file(content, file.filename)
-        if not parsed_results:
-            return {"code": 400, "message": "文件解析失败或文件为空"}
+        if not files:
+            return {"code": 400, "message": "未选择文件"}
         
-        # 后台处理数据
-        results_count = len(parsed_results) - 1 if len(parsed_results) > 1 else 0
-        background_tasks.add_task(
-            process_scan_results,
-            parsed_results,
-            id,
-            project.get("name", ""),
-            file.filename
-        )
+        project_name = project.get("name", "")
+        total_results_count = 0
+        processed_files = []
+        failed_files = []
+        
+        # 处理每个文件
+        for file in files:
+            try:
+                # 读取并解析文件
+                content = await file.read()
+                parsed_results = await parse_uploaded_file(content, file.filename)
+                
+                if not parsed_results:
+                    failed_files.append({
+                        "filename": file.filename,
+                        "error": "文件解析失败或文件为空"
+                    })
+                    continue
+                
+                # 计算结果数量
+                results_count = len(parsed_results) - 1 if len(parsed_results) > 1 else 0
+                total_results_count += results_count
+                
+                # 后台处理数据
+                background_tasks.add_task(
+                    process_scan_results,
+                    parsed_results,
+                    id,
+                    project_name,
+                    file.filename
+                )
+                
+                processed_files.append({
+                    "filename": file.filename,
+                    "file_size": file.size,
+                    "results_count": results_count
+                })
+                
+            except Exception as file_error:
+                logger.error(f"处理文件 {file.filename} 错误: {str(file_error)}")
+                failed_files.append({
+                    "filename": file.filename,
+                    "error": str(file_error)
+                })
+        
+        # 准备响应消息
+        success_count = len(processed_files)
+        failed_count = len(failed_files)
+        
+        if success_count > 0 and failed_count == 0:
+            message = f"成功上传 {success_count} 个文件，发现 {total_results_count} 条结果，正在后台处理"
+        elif success_count > 0 and failed_count > 0:
+            message = f"成功上传 {success_count} 个文件，{failed_count} 个文件处理失败，发现 {total_results_count} 条结果，正在后台处理"
+        else:
+            message = f"所有 {failed_count} 个文件处理失败"
         
         return {
-            "code": 200,
-            "message": f"文件上传成功，发现{results_count}条结果，正在后台处理",
+            "code": 200 if success_count > 0 else 400,
+            "message": message,
             "data": {
-                "filename": file.filename,
-                "file_size": file.size,
-                "results_count": results_count,
-                "project_id": id
+                "project_id": id,
+                "total_files": len(files),
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_results_count": total_results_count,
+                "processed_files": processed_files,
+                "failed_files": failed_files
             }
         }
+        
     except Exception as e:
-        logger.error(f"上传文件错误: {str(e)}")
+        logger.error(f"批量上传文件错误: {str(e)}")
         logger.error(traceback.format_exc())
         return {"code": 500, "message": f"上传失败: {str(e)}"}
 
