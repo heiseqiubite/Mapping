@@ -6,7 +6,6 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, BackgroundTasks, File, UploadFile, Form
 
 from api.project.handler import update_project, delete_asset_project_handler, parse_uploaded_file, process_scan_results
-from api.project.scan import scheduler_project
 from api.task.handler import scheduler_scan_task, insert_task
 from api.task.util import delete_asset, get_target_list
 from api.users import verify_token

@@ -254,18 +254,6 @@ async def get_fingerprint(client):
         APP[document['id']] = document['name']
 
 
-# async def get_sens_rule(client):
-#     collection = client["SensitiveRule"]
-#     cursor = collection.find({}, {"_id": 1, "name": 1, "color": 1})
-#     async for document in cursor:
-#         document['id'] = str(document['_id'])
-#         del document['_id']
-#         SensitiveRuleList[document['id']] = {
-#             "name": document['name'],
-#             "color": document['color']
-#         }
-
-
 async def get_project(client):
     collection = client["project"]
     cursor = collection.find({}, {"_id": 1, "name": 1})
