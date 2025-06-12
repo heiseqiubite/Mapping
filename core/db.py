@@ -54,7 +54,7 @@ async def create_database():
             print("\n" + "=" * 50)
             print("✨✨✨ IMPORTANT NOTICE: Please review the User/Password below ✨✨✨")
             print("=" * 50)
-            print(f"🔑 User/Password: ScopeSentry/{password}")
+            print(f"🔑 User/Password: admin/{password}")
             print("=" * 50)
             print("✅ Ensure the User/Password is correctly copied!\n")
             print("✅ The initialization password is stored in the file PASSWORD\n")
@@ -63,7 +63,7 @@ async def create_database():
 
             total_steps = 16
             # 用户数据
-            await collection.insert_one({"username": "ScopeSentry",
+            await collection.insert_one({"username": "admin",
                                          'password': hashlib.sha256(password.encode()).hexdigest()})
             logger.info("Project initialization")
             print_progress_bar(1, total_steps, "install")
