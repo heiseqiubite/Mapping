@@ -11,8 +11,10 @@ from pathlib import Path
 from datetime import datetime
 from bson.objectid import ObjectId
 from pymongo import UpdateOne
+import asyncio
 
 from core.db import get_mongo_db
+from core.util import get_root_domain
 from loguru import logger
 
 
@@ -316,6 +318,56 @@ def extract_scan_technologies(frameworks: dict) -> list:
         technologies.append(tech)
     
     return technologies
+
+
+async def update_project_count():
+    """更新项目资产数量统计"""
+    async for db in get_mongo_db():
+        cursor = db.project.find({}, {"_id": 0, "id": {"$toString": "$_id"}})
+        results = await cursor.to_list(length=None)
+
+        async def update_count(id):
+            query = {"project": {"$eq": id}}
+            total_count = await db.asset.count_documents(query)
+            if total_count != 0:
+                update_document = {
+                    "$set": {
+                        "AssetCount": total_count
+                    }
+                }
+                await db.project.update_one({"_id": ObjectId(id)}, update_document)
+
+        fetch_tasks = [update_count(r['id']) for r in results]
+        await asyncio.gather(*fetch_tasks)
+
+
+def get_before_last_dash(s: str) -> str:
+    """获取最后一个短横线前的内容"""
+    index = s.rfind('-')  # 查找最后一个 '-' 的位置
+    if index != -1:
+        return s[:index]  # 截取从开头到最后一个 '-' 前的内容
+    return s  # 如果没有 '-'，返回原字符串
+
+
+async def process_project_target_list(target, ignore=""):
+    """处理项目目标列表，返回根域名列表"""
+    from api.task.util import get_target_list
+    
+    root_domains = []
+    target_list = await get_target_list(target, ignore)
+    
+    for tg in target_list:
+        if "CMP:" in tg or "ICP:" in tg or "APP:" in tg or "APP-ID:" in tg:
+            root_domain = tg.replace("CMP:", "").replace("ICP:", "").replace("APP:", "").replace("APP-ID:", "")
+            if "ICP:" in tg:
+                root_domain = get_before_last_dash(root_domain)
+        else:
+            root_domain = get_root_domain(tg)
+        
+        if root_domain not in root_domains:
+            root_domains.append(root_domain)
+    
+    return root_domains
 
 
 

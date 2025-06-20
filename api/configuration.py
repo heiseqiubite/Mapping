@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 from starlette.background import BackgroundTasks
 import datetime
 from api.users import verify_token
-from core.apscheduler_handler import scheduler
+from api.task.handler import scheduler
 from core.db import get_mongo_db
 from core.redis_handler import refresh_config
 from core.config import set_timezone

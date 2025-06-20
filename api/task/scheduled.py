@@ -12,11 +12,9 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends
 from pytz import utc
 
-from api.task.handler import scheduler_scan_task, create_page_monitoring_task, insert_scheduled_tasks
+from api.task.handler import scheduler_scan_task, create_page_monitoring_task, insert_scheduled_tasks, scheduler
 from api.users import verify_token
 from motor.motor_asyncio import AsyncIOMotorCursor
-
-from core.apscheduler_handler import scheduler
 from core.db import get_mongo_db
 from core.redis_handler import get_redis_pool
 from core.util import *

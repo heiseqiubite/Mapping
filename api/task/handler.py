@@ -1,72 +1,186 @@
 # -------------------------------------
-# @file      : handler.py
+# @file      : handlers.py
 # @author    : Autumn
 # @contact   : rainy-autumn@outlook.com
 # @time      : 2024/10/28 22:09
 # -------------------------------------------
 import asyncio
 import json
+import re
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCursor
 from pymongo import DESCENDING
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.mongodb import MongoDBJobStore
 
 from api.asset.page_monitoring import get_page_monitoring_data
 from api.node.handler import get_node_all
-from core.apscheduler_handler import scheduler
 from api.task.util import get_target_list
+from core.config import *
 from core.db import get_mongo_db
-from core.handler.task import get_task_data
 from core.redis_handler import get_redis_pool, get_redis_online_data
-from core.util import get_now_time, get_search_query
+from core.util import get_now_time, get_search_query, get_root_domain
 from loguru import logger
+
+# =============================================================================
+# 调度器管理
+# =============================================================================
+
+# MongoDB配置
+mongo_config = {
+    'host': MONGODB_IP,
+    'port': int(MONGODB_PORT),
+    'username': str(MONGODB_USER),
+    'password': str(MONGODB_PASSWORD),
+    'database': str(MONGODB_DATABASE),
+    'collection': 'apscheduler'
+}
+
+# JobStore配置
+jobstores = {
+    'mongo': MongoDBJobStore(**mongo_config)
+}
+
+# 创建调度器实例
+scheduler = AsyncIOScheduler(jobstores=jobstores)
+
+def get_scheduler():
+    """获取调度器实例"""
+    return scheduler
+
+def start_scheduler():
+    """启动调度器"""
+    if not scheduler.running:
+        scheduler.start()
+
+def shutdown_scheduler():
+    """关闭调度器"""
+    if scheduler.running:
+        scheduler.shutdown()
+
+def add_job(func, trigger=None, **kwargs):
+    """添加任务"""
+    return scheduler.add_job(func, trigger, **kwargs)
+
+def remove_job(job_id):
+    """移除任务"""
+    return scheduler.remove_job(job_id)
+
+def get_job(job_id):
+    """获取任务"""
+    return scheduler.get_job(job_id)
+
+def get_jobs():
+    """获取所有任务"""
+    return scheduler.get_jobs()
+
+# =============================================================================
+# 核心数据处理
+# =============================================================================
+
+async def get_task_data(db, request_data, id):
+    """获取任务数据模板"""
+    # 获取模板数据
+    template_data = await db.ScanTemplates.find_one({"_id": ObjectId(request_data["template"])})
+    # 如果选择了poc 将poc参数拼接到nuclei的参数中
+    if len(template_data['vullist']) != 0:
+        vul_tmp = ""
+        if "All Poc" in template_data['vullist']:
+            vul_tmp = "*"
+        else:
+            for vul in template_data['vullist']:
+                vul_tmp += vul + ".yaml" + ","
+        vul_tmp = vul_tmp.strip(",")
+
+        if "VulnerabilityScan" not in template_data["Parameters"]:
+            template_data["Parameters"]["VulnerabilityScan"] = {"ed93b8af6b72fe54a60efdb932cf6fbc": ""}
+        if "ed93b8af6b72fe54a60efdb932cf6fbc" not in template_data["Parameters"]["VulnerabilityScan"]:
+            template_data["Parameters"]["VulnerabilityScan"]["ed93b8af6b72fe54a60efdb932cf6fbc"] = ""
+
+        if "ed93b8af6b72fe54a60efdb932cf6fbc" in template_data["VulnerabilityScan"]:
+            template_data["Parameters"]["VulnerabilityScan"]["ed93b8af6b72fe54a60efdb932cf6fbc"] = \
+                template_data["Parameters"]["VulnerabilityScan"][
+                    "ed93b8af6b72fe54a60efdb932cf6fbc"] + " -t " + vul_tmp
+    # 解析参数，支持{}获取字典
+    template_data["Parameters"] = await parameter_parser(template_data["Parameters"], db)
+    # 删除原始的vullist
+    del template_data["vullist"]
+    del template_data["_id"]
+    # 设置任务名称
+    template_data["TaskName"] = request_data["name"]
+    # 设置忽略目标
+    template_data["ignore"] = request_data["ignore"]
+    # 设置去重
+    template_data["duplicates"] = request_data["duplicates"]
+    # 任务id
+    template_data["ID"] = str(id)
+    # 任务类型
+    template_data["type"] = request_data.get("type", "scan")
+    # 是否暂停后开启
+    template_data["IsStart"] = request_data.get("IsStart", False)
+    return template_data
+
+async def parameter_parser(parameter, db):
+    """参数解析器"""
+    dict_list = {}
+    port_list = {}
+    # 获取字典
+    cursor: AsyncIOMotorCursor = db["dictionary"].find({})
+    result = await cursor.to_list(length=None)
+    for doc in result:
+        dict_list[f'{doc["category"].lower()}.{doc["name"].lower()}'] = str(doc['_id'])
+    # 获取端口
+    cursor: AsyncIOMotorCursor = db.PortDict.find({})
+    result = await cursor.to_list(length=None)
+    for doc in result:
+        port_list[f'{doc["name"].lower()}'] = doc["value"]
+
+    for module_name in parameter:
+        for plugin in parameter[module_name]:
+            matches = re.findall(r'\{(.*?)\}', parameter[module_name][plugin])
+            for match in matches:
+                tp, value = match.split(".", 1)
+                if tp == "dict":
+                    if value.lower() in dict_list:
+                        real_param = dict_list[value.lower()]
+                    else:
+                        real_param = match
+                        logger.error(f"parameter error:module {module_name} plugin {plugin}  parameter {parameter[module_name][plugin]}")
+                    parameter[module_name][plugin] = parameter[module_name][plugin].replace("{" + match + "}", real_param)
+                elif tp == "port":
+                    if value.lower() in port_list:
+                        real_param = port_list[value.lower()]
+                    else:
+                        real_param = match
+                        logger.error(
+                            f"parameter error:module {module_name} plugin {plugin}  parameter {parameter[module_name][plugin]}")
+                    parameter[module_name][plugin] = parameter[module_name][plugin].replace("{" + match + "}", real_param)
+    return parameter
+
+# =============================================================================
+# 任务处理逻辑
+# =============================================================================
 
 running_tasks = set()
 
-
 async def insert_task(request_data, db):
+    """插入任务"""
     # 解析多种来源设置target
     targetSource = request_data.get("targetSource", "general")
-    if "Source" in targetSource:
-        # 如果是从资产处选则数据进行创建任务
-        index = targetSource.replace("Source", "")
-        targetTp = request_data.get("targetTp")
-        if targetTp == "search":
-            # 如果是按照当前搜索条件进行搜索
-            targetNumber = int(request_data.get("targetNumber", 0))
-            if targetNumber == 0:
-                return {"code": 400, "message": "targetNumber is 0"}
-            query = await get_search_query(index, request_data)
-            target = await get_target_search(query, targetNumber, index, db)
-            request_data["target"] = target
-        else:
-            # 按照选择的数据进行创建任务
-            targetIds = request_data.get("targetIds", [])
-            if len(targetIds) == 0:
-                return {"code": 400, "message": "targetIds is null"}
-            target = await get_target_ids(targetIds, index, db)
-            request_data["target"] = target
-    elif targetSource == "general":
-        # 普通创建
-        target = request_data.get("target", "")
-    elif targetSource == "project":
-        # 从项目创建
-        project_ids = request_data.get("project", [])
-        if len(project_ids) == 0:
-            return {"code": 400, "message": "project is null"}
-        target = await get_target_project(project_ids, db)
-        request_data["target"] = target
-        request_data["filter"] = {"project": project_ids}
-        if len(project_ids) == 1:
-            request_data["bindProject"] = project_ids[0]
+    targetList = []
+    
+    if targetSource == "project" or targetSource == "scan":
+        targetList = await get_target_list(request_data['target'], request_data.get("ignore", ""))
     else:
-        project_ids = request_data.get("project", [])
-        request_data["filter"] = {"project": project_ids}
-        query = await get_search_query(targetSource, request_data)
-        target = await get_target_search(query, 0, targetSource, db)
-        request_data["target"] = target
-    targetList = await get_target_list(request_data['target'], request_data.get("ignore", ""))
+        target_data = await db.ProjectTargetData.find_one({"id": request_data.get('project', [''])})
+        targetList = await get_target_list(target_data.get('target', ''), request_data.get("ignore", ""))
+    
+    if len(targetList) == 0:
+        return ""
+    
     taskNum = len(targetList)
+    
     if "_id" in request_data:
         del request_data["_id"]
     request_data['taskNum'] = taskNum
@@ -83,8 +197,8 @@ async def insert_task(request_data, db):
         task.add_done_callback(lambda t: running_tasks.remove(t))
         return result.inserted_id
 
-
 async def create_scan_task(request_data, id, stop_to_start=False):
+    """创建扫描任务"""
     logger.info(f"[create_scan_task] begin: {id}")
     async for db in get_mongo_db():
         async for redis_con in get_redis_pool():
@@ -120,79 +234,8 @@ async def create_scan_task(request_data, id, stop_to_start=False):
             logger.info(f"[create_scan_task] end: {id}")
             return True
 
-
-async def get_target_project(ids, db):
-    cursor: AsyncIOMotorCursor = db.ProjectTargetData.find({"id": {"$in": ids}})
-    targets = ""
-    async for doc in cursor:
-        targets += doc.get("target", "").strip() + "\n"
-    return targets.strip()
-
-
-async def get_target_search(query, number, index, db):
-    displayKey = {
-        'subdomain': {
-            'host': 1,
-        },
-        'asset': {
-            'url': 1,
-            'host': 1,
-            'port': 1,
-            'service': 1,
-            'type': 1,
-        },
-        'UrlScan': {
-            'output': 1,
-        },
-        'RootDomain': {
-            'domain': 1
-        }
-    }
-    if index not in displayKey:
-        return ""
-    if number == 0:
-        cursor: AsyncIOMotorCursor = db[index].find(query, displayKey[index])
-    else:
-        cursor: AsyncIOMotorCursor = db[index].find(query, displayKey[index]).limit(number).sort([("time", DESCENDING)])
-    target = ""
-    async for doc in cursor:
-        if index == "asset":
-            if doc["type"] == "http":
-                target += doc.get("url", "") + "\n"
-            else:
-                target += doc.get("service", "http") + "://" + doc["host"] + ":" + str(doc["port"]) + "\n"
-        elif index == "subdomain":
-            target += doc.get("host", "") + "\n"
-        elif index == "UrlScan":
-            target += doc.get("output", "") + "\n"
-        elif index == "RootDomain":
-            target += doc.get("domain", "") + "\n"
-    return target
-
-
-async def get_target_ids(ids, index, db):
-    key = ["asset", "UrlScan", "subdomain"]
-    if index not in key:
-        return {"code": 404, "message": "Data not found"}
-    obj_ids = []
-    for data_id in ids:
-        obj_ids.append(ObjectId(data_id))
-    cursor = db[index].find({"_id": {"$in": obj_ids}})
-    target = ''
-    async for doc in cursor:
-        if index == "asset":
-            if doc["type"] == "http":
-                target += doc.get("url", "") + "\n"
-            else:
-                target += doc.get("service", "http") + "://" + doc["host"] + ":" + str(doc["port"]) + "\n"
-        elif index == "subdomain":
-            target += doc.get("host", "") + "\n"
-        elif index == "UrlScan":
-            target += doc.get("output", "") + "\n"
-    return target
-
-
 async def scheduler_scan_task(id, tp):
+    """调度扫描任务"""
     logger.info(f"Scheduler scan {id}")
     async for db in get_mongo_db():
         next_time = scheduler.get_job(id).next_run_time
@@ -209,16 +252,16 @@ async def scheduler_scan_task(id, tp):
         doc["name"] = doc["name"] + f"-{doc.get('targetSource', 'None')}-" + time_now
         await insert_task(doc, db)
 
-
 async def get_page_monitoring_time():
+    """获取页面监控时间"""
     async for db in get_mongo_db():
         result = await db.ScheduledTasks.find_one({"id": "page_monitoring"})
         time = result['hour']
         flag = result['state']
         return time, flag
 
-
 async def create_page_monitoring_task():
+    """创建页面监控任务"""
     logger.info("create_page_monitoring_task")
     async for db in get_mongo_db():
         async for redis in get_redis_pool():
@@ -250,8 +293,8 @@ async def create_page_monitoring_task():
             for name in name_list:
                 await redis.rpush(f"NodeTask:{name}", json.dumps(add_redis_task_data))
 
-
 async def insert_scheduled_tasks(request_data, db, update=False, id=""):
+    """插入定时任务"""
     cycle_type = request_data['cycleType']
     if cycle_type == "":
         return
@@ -284,7 +327,6 @@ async def insert_scheduled_tasks(request_data, db, update=False, id=""):
             args=[str(task_id), "scan"],
             id=task_id, jobstore='mongo'
         )
-
     elif cycle_type == "nhours":
         # 每 N 小时执行一次
         scheduler.add_job(
@@ -293,7 +335,6 @@ async def insert_scheduled_tasks(request_data, db, update=False, id=""):
             args=[str(task_id), "scan"],
             id=task_id, jobstore='mongo'
         )
-
     elif cycle_type == "weekly":
         # 每星期几执行一次
         scheduler.add_job(
@@ -303,7 +344,6 @@ async def insert_scheduled_tasks(request_data, db, update=False, id=""):
             args=[str(task_id), "scan"],
             id=task_id, jobstore='mongo'
         )
-
     elif cycle_type == "monthly":
         # 每月第几天固定时间执行
         scheduler.add_job(
@@ -323,3 +363,104 @@ async def insert_scheduled_tasks(request_data, db, update=False, id=""):
     }
     await db.ScheduledTasks.update_one({"_id": ObjectId(task_id)}, update_document)
     return
+
+# =============================================================================
+# 项目任务处理
+# =============================================================================
+
+def get_before_last_dash(s: str) -> str:
+    """获取最后一个短横线前的内容"""
+    index = s.rfind('-')  # 查找最后一个 '-' 的位置
+    if index != -1:
+        return s[:index]  # 截取从开头到最后一个 '-' 前的内容
+    return s  # 如果没有 '-'，返回原字符串
+
+async def handle_project_scheduler_task(project_data, project_id, scheduled_tasks, hour):
+    """处理项目的定时任务"""
+    if scheduled_tasks:
+        # 添加定时任务
+        add_job(scheduler_scan_task, 'interval', hours=hour, args=[project_id, "project"],
+                id=project_id, jobstore='mongo')
+        
+        # 获取下次运行时间
+        job = get_job(project_id)
+        if job:
+            next_time = job.next_run_time
+            formatted_time = next_time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 保存到ScheduledTasks集合
+            async for db in get_mongo_db():
+                scheduled_data = {
+                    "name": project_data.get("name", ""),
+                    "state": True,
+                    "type": "project",
+                    "lastTime": "",
+                    "nextTime": formatted_time,
+                    "id": project_id,
+                    "target": project_data.get("target", ""),
+                    "node": project_data.get("node", []),
+                    "hour": hour,
+                    "allNode": project_data.get("allNode", False),
+                    "duplicates": project_data.get("duplicates", ""),
+                    "template": project_data.get("template", ""),
+                    "ignore": project_data.get("ignore", ""),
+                    "tag": project_data.get("tag", "")
+                }
+                await db.ScheduledTasks.insert_one(scheduled_data)
+            return True
+    return False
+
+async def remove_project_scheduler_task(project_id):
+    """移除项目的定时任务"""
+    # 移除调度器中的任务
+    job = get_job(project_id)
+    if job:
+        remove_job(project_id)
+    
+    # 删除数据库中的定时任务记录
+    async for db in get_mongo_db():
+        await db.ScheduledTasks.delete_many({"id": project_id})
+
+async def update_project_scheduler_task(project_data, project_id, scheduled_tasks, hour):
+    """更新项目的定时任务"""
+    # 先移除现有的任务
+    await remove_project_scheduler_task(project_id)
+    
+    # 如果需要定时任务，重新创建
+    if scheduled_tasks:
+        return await handle_project_scheduler_task(project_data, project_id, scheduled_tasks, hour)
+    
+    return True
+
+async def run_project_task_now(project_data, project_id):
+    """立即运行项目任务"""
+    time_now = get_now_time()
+    task_data = project_data.copy()
+    task_data["name"] = task_data.get("name", "") + "-project-" + time_now
+    
+    async for db in get_mongo_db():
+        await insert_task(task_data, db)
+
+async def process_project_target_list(target, ignore=""):
+    """处理项目目标列表，返回根域名列表"""
+    root_domains = []
+    target_list = await get_target_list(target, ignore)
+    
+    for tg in target_list:
+        if "CMP:" in tg or "ICP:" in tg or "APP:" in tg or "APP-ID:" in tg:
+            root_domain = tg.replace("CMP:", "").replace("ICP:", "").replace("APP:", "").replace("APP-ID:", "")
+            if "ICP:" in tg:
+                root_domain = get_before_last_dash(root_domain)
+        else:
+            root_domain = get_root_domain(tg)
+        
+        if root_domain not in root_domains:
+            root_domains.append(root_domain)
+    
+    return root_domains
+
+async def scheduler_project(id):
+    """废弃的项目调度函数（保留用于兼容性）"""
+    logger.warning(f"scheduler_project is deprecated, project id: {id}")
+    # 原来的代码被注释，这里只是一个占位符
+    pass 

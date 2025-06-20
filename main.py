@@ -29,7 +29,7 @@ from starlette.websockets import WebSocketDisconnect
 
 app = FastAPI(timeout=None)
 
-from core.apscheduler_handler import scheduler
+from api.task.handler import scheduler
 
 
 async def update():
@@ -94,7 +94,7 @@ async def http_exception_handler(request, exc):
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-from api import users, poc, configuration, fingerprint, node, task, notification, system, export, project_aggregation
+from api import users, poc, configuration, fingerprint, node, task, notification, system, export
 from api.dictionary import router as dictionary_router
 from api.asset import router as asset_route
 from api.plugins import router as plugin_route
@@ -113,7 +113,7 @@ app.include_router(asset_route, prefix='/api')
 app.include_router(notification.router, prefix='/api')
 app.include_router(system.router, prefix='/api')
 app.include_router(export.router, prefix='/api')
-app.include_router(project_aggregation.router, prefix='/api/project_aggregation')
+# project_aggregation路由已移动到project模块中
 app.mount("/assets", StaticFiles(directory="static/assets"), name="assets")
 
 

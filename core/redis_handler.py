@@ -9,7 +9,6 @@ from urllib.parse import quote_plus
 import redis.asyncio as redis
 
 from core.db import *
-from core.handler.task import get_task_data
 from core.util import *
 import socket
 from motor.motor_asyncio import AsyncIOMotorCursor
@@ -108,6 +107,9 @@ async def subscribe_log_channel():
 
 
 async def check_node_task(node_name, redis_conn):
+    # 动态导入以避免循环导入
+    from api.task.handler import get_task_data
+    
     async for mongo_client in get_mongo_db():
         query = {
             "progress": {"$ne": 100},

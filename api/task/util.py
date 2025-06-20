@@ -36,7 +36,7 @@ async def generate_target(target):
             start_ip, end_ip = target.split('-')
             l = await generate_ip_range(start_ip, end_ip)
             return l
-        elif '/' in target:
+        elif '/8' in target:
             network = ipaddress.ip_network(target, strict=False)
             return [str(ip) for ip in network.hosts()]
         else:

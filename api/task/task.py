@@ -10,12 +10,10 @@ from fastapi import APIRouter, Depends, BackgroundTasks
 from pymongo import DESCENDING
 
 from api.project.handler import update_project
-from api.task.handler import insert_task, create_scan_task, insert_scheduled_tasks
+from api.task.handler import insert_task, create_scan_task, insert_scheduled_tasks, scheduler
 from api.task.util import task_progress, delete_asset, get_target_list
 from api.users import verify_token
 from motor.motor_asyncio import AsyncIOMotorCursor
-
-from core.apscheduler_handler import scheduler
 from core.db import get_mongo_db
 from core.redis_handler import get_redis_pool, refresh_config
 from core.util import *
@@ -531,7 +529,8 @@ async def sync_project_task(request_data: dict, db=Depends(get_mongo_db), _: dic
             "root_domains": root_domains,
             "ignore": ignore,
             "logo": "",
-            "tag": tag
+            "tag": tag,
+            "scheduledTasks": False
         }
         result = await db.project.insert_one(project_obj)
         if result.inserted_id:
